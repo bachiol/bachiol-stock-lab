@@ -1,0 +1,40 @@
+﻿금융감독원 OpenDART를 서버에서 연결해 종목 검색과 최근 5개 사업연도 재무를 가져와줘. 키는 .env.local의 OPENDART_API_KEY를 서버만 읽고, 요청 주소나 키를 출력하지 마. 기준은 https://opendart.fss.or.kr 의 공식 개발가이드야. 아래 계정 ID와 필드도 공식 문서 및 실제 응답으로 확인하고, 확인되지 않은 매핑은 적용하지 마.
+
+[종목 검색]
+- https://opendart.fss.or.kr/api/corpCode.xml (ZIP 안의 CORPCODE.xml)에서 stock_code가 6자리인 기업만 골라 회사명·종목코드·기업코드 목록을 만든다. 서버 캐시 폴더에 저장하고 24시간 지나면 다시 받는다.
+- GET /api/companies?q=검색어: 회사명 일부, 6자리 종목코드, 또는 "현재 ○○ 주가가 얼마야?" 같은 문장을 받아 후보를 돌려준다. 문장 안에 회사명 전체가 들어 있으면 그 회사를, 독립된 6자리 숫자가 있으면 그 종목을 찾는다. 더 긴 회사명 안에 포함된 짧은 이름은 중복 후보로 만들지 않는다.
+- 화면: 입력하면 후보 목록이 뜨고, 사용자가 후보를 고른 뒤 "선택 종목 조회"를 눌러야 시세와 재무를 조회한다. 입력 중에는 검색만 한다.
+- 이름 → 종목코드는 우리 검색 기능이 하고, 종목코드 → 시세는 KB증권 Open API가 한다. 화면의 종목명은 KB가 돌려준 이름을 쓰고, 공시상 회사명이 다르면 함께 보여준다.
+- 이 버전의 공시 재무 연결은 종목 목록에 매핑되는 기업 중심이다. 우선주·ETF·ETN 등 매핑되지 않는 대상에는 이 도구의 지원 범위를 안내한다. 이를 해당 상품에 공시나 재무정보가 전혀 없다는 뜻으로 설명하지 않는다.
+
+[재무 조회]
+- company.json으로 결산월(acc_mt)과 업종코드(induty_code)를 확인한다. 업종코드가 64, 65, 66으로 시작하면 금융업이다.
+- fnlttSinglAcntAll.json을 reprt_code 11011(사업보고서)로 조회한다. 연결(fs_div CFS)을 먼저, 자료 없음(status 013)일 때만 별도(OFS)를 쓴다. 가장 최근에 공시된 완료 사업연도부터 연속 5개 연도를 가져온다. 아직 공시되지 않은 해를 추정하지 않는다.
+- 금액은 thstrm_amount(당기) 문자열을 원 단위 정수로 읽는다. 같은 계정의 후보 금액이 서로 다르면 그 계정은 "자료 부족"으로 둔다.
+- 계정은 표준 ID를 먼저 찾고, 없으면 계정명으로 찾는다(공백은 무시).
+  · 매출액 ifrs-full_Revenue / 영업이익 dart_OperatingIncomeLoss / 지배주주순이익 ifrs-full_ProfitLossAttributableToOwnersOfParent (손익계산서 IS 또는 CIS)
+  · 지배주주지분 ifrs-full_EquityAttributableToOwnersOfParent: 당기말은 thstrm_amount, 기초는 같은 보고서의 전기말 금액(frmtrm_amount)을 후보로 사용하되, 해당 사업연도 기초와의 일치 및 재작성 여부를 원문에서 확인한다. 불일치하면 임의로 기초값으로 쓰지 않는다
+  · 부채총계 ifrs-full_Liabilities / 자본총계 ifrs-full_Equity / 현금및현금성자산 ifrs-full_CashAndCashEquivalents (재무상태표 BS)
+  · 차입금: 단기차입금 ifrs-full_ShorttermBorrowings, 유동성장기차입금 ifrs-full_CurrentPortionOfLongtermBorrowings, 장기차입금 ifrs-full_LongtermBorrowings, 사채, 유동성사채, 유동 리스부채 ifrs-full_CurrentLeaseLiabilities, 비유동 리스부채 ifrs-full_NoncurrentLeaseLiabilities.
+    - 같은 금액을 두 번 더하지 않는다. "유동성장기부채", "차입금 및 사채"처럼 여러 항목을 묶은 합계 계정(예: ifrs-full_CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings)이 있으면 그 합계와 그 안에 포함된 세부 항목(유동성사채, 리스부채 등)을 함께 더하지 않는다.
+    - 포함 관계는 사업보고서 원문의 차입금 주석 표에서 확인한다. 합계 계정의 금액이 주석의 세부 항목 합과 일치하면 세부 항목을 제외한다.
+    - 이름에 "차입금", "사채", "리스부채"가 들어가는데 위 분류에 해당하지 않는 계정이 있으면 총차입금을 계산하지 않고 "자료 부족"으로 둔다. 금액이 음수이거나 원화가 아니어도 계산하지 않는다.
+    - 주석과 대조하지 못했지만 재무상태표에 서로 겹치지 않는 항목으로 올라와 있으면 그대로 합산하고 화면에 "주석 미대조"라고 표시한다.
+  · 이자비용 ifrs-full_InterestExpense. 손익계산서에 없으면 사업보고서 원문(document.xml ZIP)에서 찾는다. 금융원가 전체로 대신하지 않는다. 찾지 못하면 "자료 부족".
+    - 원문에서 당기 연간 합계, 연결/별도, 통화·단위, 이자비용 계정과 표의 포함 관계가 모두 확인될 때만 사용한다. 특정 XML 속성 문자열이나 주변 글자 수만으로 기간·단위를 확정하지 않는다.
+    - 괄호·음수는 원문 부호를 보존하고 비용 표시 관행이 확인될 때만 계산용 양수로 정규화한다. 동일 조건의 금액이 충돌하거나 단위·범위가 불분명하면 자료 부족으로 둔다.
+  · 영업활동현금흐름 ifrs-full_CashFlowsFromUsedInOperatingActivities (계정명 "영업활동현금흐름", "영업활동순현금흐름", "영업활동순현금흐름 합계" 등도 인정. "영업활동에서 창출된 현금"은 다른 계정이므로 쓰지 않는다)
+  · 유형자산의 취득 ifrs-full_PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities / 무형자산의 취득 ifrs-full_PurchaseOfIntangibleAssetsClassifiedAsInvestingActivities (현금흐름표 CF)
+  · 기본주당이익 ifrs-full_BasicEarningsLossPerShare (없으면 "보통주 기본 및 희석주당이익" 같은 계정명)
+- 회사마다 계정명과 ID가 조금씩 다르다. 찾지 못한 계정은 0으로 채우지 말고 그 항목만 "자료 부족"으로 둔다.
+- OpenDART 응답은 서버 캐시 폴더에 저장해 같은 요청을 반복하지 않는다.
+
+[서버와 화면]
+- GET /api/financials?symbol=6자리 → 5개 연도의 원본 금액, 계정명, 계정 ID, 연결/별도 구분, 접수번호, 원문 링크(https://dart.fss.or.kr/dsaf001/main.do?rcpNo=접수번호).
+- 조회 버튼은 KB 시세와 OpenDART 재무를 각각 요청하고 상태를 따로 표시한다. 종목을 바꾸면 이전 결과를 지우고, 늦게 도착한 이전 종목의 응답이 새 화면을 덮지 않게 한다.
+- 각 질문 카드의 "원본·공시 근거" 칸에 연도별 원본 금액과 원문 링크를, "최근 5년 재무 추이" 칸에 5개 연도 표를 넣는다. 출처는 "OpenDART"로 표시해 KB 값과 구분한다.
+
+끝나면 종목 하나를 이름으로 검색해 조회하고, 매출액과 영업이익이 공시 원문과 같은지 확인해줘.
+- ZIP은 경로 이탈·압축 해제 크기 제한을 검사하고 XML 외부 엔티티를 처리하지 않는다. 인증 실패·호출 한도·통신 오류를 자료 없음으로 처리하지 않는다.
+- 재무 캐시는 조회 시각과 만료 정책을 두고 재조회할 수 있게 한다. 정정공시는 접수번호와 기준을 다시 확인한다. 다년 비교에서 연결/별도, 기간 길이, 통화 및 재작성 기준이 맞지 않으면 비교하지 않는다.
+- 취득 지출은 현금흐름표의 실제 지출인지 확인한다. 누락을 0으로 처리하거나 자산 처분액을 취득액에 섞지 않는다.
